@@ -1,0 +1,303 @@
+---
+title: "Prediction of Interest Rate"
+author: "Yang Liu, Xinmin Wang, Jonathan Jonker"
+date: "March 10, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(car)
+library(alr3)
+library(MASS)
+library(faraway)
+```
+
+## Data cleaning and save new data
+
+#### Delete incomplete cases (32 cases out of 42538 cases)
+#### Add GDP growth rate according to the year of loan application
+#### Delete cases which home ownership = OTHER or NONE (199 cases out of 42506)
+#### Save new data (42307 obs)
+
+## Load data
+
+```{r clean, echo=FALSE}
+loandata<-read.csv(file = "~/stats-poster/clean_loan_data_gdp_42307obs.csv")
+loandata<-loandata[complete.cases(loandata),] #make sure cases are complete
+summary(loandata) #summary
+loandata$home_ownership = as.factor(loandata$home_ownership)
+loandata$term = as.factor(loandata$term)
+loandata$annual_inc = as.numeric(loandata$annual_inc)
+```
+
+## Partial Correlation heat map(Xinmin)
+
+```{r}
+
+```
+
+## Check Intitial Model (all variables, no transformation)
+
+```{r}
+int.model<-lm(int_rate~.,data = loandata)
+summary(int.model)
+```
+
+Annual income and delinquency is not significant when controlling for the other variables.
+
+## Stepwise Variable Selection
+
+```{r}
+step(int.model)
+```
+
+Annual income is excluded later on to reduce sample complexity.
+
+## Check scatterplot matrix
+
+Take a small sample and plot
+```{r,echo= FALSE}
+set.seed(1)
+rand<-sample(1:42307, size = 5000)
+pairs(loandata[rand,c(1,2,6,7,8,9,10,11)])
+```
+
+Some variable need to be transformed
+
+## Box-Cox Transformation
+
+```{r}
+tr = powerTransform(cbind(loandata$loan_amnt,loandata$dti+1,loandata$delinq_2yrs+0.1,loandata$fico_range_low,loandata$open_acc,loandata$revol_util+1,loandata$gdp+0.0093)~1)
+summary(tr) #(0.25 0.77 -3.46 -2.16 0.25 0.75 1.36)
+#test if the lambda c(1,1,-3,-2,0,1,1) we choose is within 95% CI
+testTransform(tr,c(1,1,-3,-2,0,1,1))
+```
+
+We pick lambda=c(0,1,-3,-2,0,1,1) for these covariates.
+And We tested them, they ARE within 95% confidence interval!
+Therefore we transform the covariates and combined with the other columns
+
+```{r}
+tr.varialbes = as.data.frame(bcPower(cbind(loandata$loan_amnt,loandata$dti+1,loandata$delinq_2yrs+0.1,loandata$fico_range_low,loandata$open_acc,loandata$revol_util+1,loandata$gdp+0.0093),lambda=c(0,1,-3,-2,0,1,1)))
+loandata.tr = cbind(loandata$int_rate,tr.varialbes,loandata$term,loandata$home_ownership)
+colnames(loandata.tr) = c("int_rate","logloan_amnt","dti_1","tr_delinq_2yrs","fico_range_-2","logopen_acc","revol_util_1","gdp_1","terms","home_ownership")
+summary(loandata.tr)
+```
+
+## Model without transform response variable
+
+```{r}
+md1<-lm(int_rate~.,data = loandata.tr)
+summary(md1)# delinquency not significant controlling other variables
+plot(loandata$int_rate,fitted(md1),xlab = "interest rate",ylab = "fitted interest rate",main = "fitted after covariates transf") #some curvature
+abline(0,1,col='red') 
+```
+
+## Transformation on Response
+
+```{r}
+boxcox(md1,plotit=FALSE,lambda = seq(0,1,by=0.1)) #confidence interval does not contain 1.
+
+md2<-lm(int_rate^0.6~.,data = loandata.tr)
+summary(md2)# delinquency still not significant controlling other variables
+par(mfrow=c(1,2))#compare two plots
+plot(loandata$int_rate,fitted(md1),xlab = "interest rate",ylab = "fitted interest rate",main = "fitted before tr. on response") #some curvature
+abline(0,1,col='red') 
+plot(loandata.tr$int_rate^0.6,fitted(md2),xlab = "transformed interest rate",ylab = "fitted transformed interest rate",main = "fitted value after transformation") #better after transformation
+abline(0,1,col='red') 
+
+
+```
+
+For prediction purposes, we pick the best value of $\lambda$
+compare to models with nontransformed int_rate,variance look more normal after transformation.
+
+## remove delinquency in our model
+
+```{r}
+md3<-lm(int_rate^0.6~.-tr_delinq_2yrs, data = loandata.tr)
+summary(md3)
+par(mfrow=c(1,2))#compare fitted plots with/without delinquency
+plot(loandata.tr$int_rate^0.6,fitted(md2),xlab = "transformed interest rate",ylab = "fitted transformed interest rate",main = "fitted value with delinquency") 
+abline(0,1,col='red')
+plot(loandata.tr$int_rate^0.6,fitted(md3),xlab = "transformed interest rate",ylab = "fitted transformed interest rate",main = "fitted value without delinquency")
+abline(0,1,col='red')
+
+```
+
+Removal of delinquency in our model does not change in model coef and p values of other covariates. also the fitted plot does not show a lot difference.
+
+## Regression diagnostics with new model
+
+### Outliers
+
+
+```{r}
+plot(fitted(md3),resid(md3),xlab = "fitted transformed interest rate",ylab= "residuals")
+abline(h=0,col='blue')
+# identify(fitted(md3),resid(md3)) #11363 15662 16022 17011 21974 28503 38284 40699 41387
+loandata[c(11363,15662,16022,21974,28503,38284,40699,41387),]#go to initial dataset and identify outliers
+#look at std res plot and identify
+plot(stdres(md3),pch=16)
+# identify(stdres(md3)) #same outliers as above
+#also compare to md2
+anova(md3,md2)# not significant on added variables
+#remove outliers and fit model
+md3.rm.outliers<-lm(int_rate^0.6~.-tr_delinq_2yrs,data = loandata.tr[-c(11363,15662,16022,21974,28503,38284,40699,41387)])
+summary(md3.rm.outliers)
+#no change in model and conclusions
+```
+
+### Study of sharp cut in residual plot
+
+```{r}
+plot(fitted(md3),resid(md3),xlab = "fitted transformed interest rate",ylab= "residuals")
+abline(h=0,col='blue')
+# identify(fitted(md3),resid(md3))
+#some example on the sharp cut line 7855  8829  8890 10304 13436 14065 18618 20885
+#identify them
+loandata[c(7855,8829,8890,10304,13436,14065,18618,20885),]# all have interest rate at 5.42, lowest rate
+# other "linear trend"
+loandata[c(17151,18028,18299, 18656, 19717, 20771, 21492, 21620, 24162, 24273, 24336),] #all have interest rate at 5.7
+
+```
+
+We find out these data points are caused by the lowest ineterest rate offered by the company.
+Also because the data is not strictly continuous, it has this step-wise like pattern.
+
+### Influential points
+
+```{r}
+halfnorm(cooks.distance(md3))
+# observation:row 11363 and row 33137
+loandata[c(11363,33137),]
+```
+
+The largest Cook's distance is 0.0025,<<0.5. We don't have any influential points.
+We still examine the points with largest Cook's distance, draw those cases out. One of them is an outlier as we studied earlier.
+
+### High leverage points
+
+```{r}
+md3inf <- influence(md3)
+halfnorm(md3inf$hat,ylab="Leverages") 
+loandata[c(42103,41782),]#check highest leverage points
+#collect data with leverage points>0.0005
+leverage_2p_n<-subset(loandata,md3inf$hat>0.0005)
+#save leverage>0.0005 data 1540 observations
+# write.csv(leverage_2p_n,file = "~/stats-poster/leverage_0p0005.csv")
+leverage_0p001<-subset(loandata,md3inf$hat>0.001)
+# write.csv(highleverage2_del,file = "~/stats-poster/leverage_0p001.csv")
+leverage_3p_n<-subset(loandata,md3inf$hat>0.0007)
+# write.csv(leverage_3p_n,file = "~/stats-poster/leverage_3p_n.csv")
+summary(leverage_3p_n)## most high leverage points have ~0 revol_util,
+#compare to the whole data set
+summary(loandata)
+```
+
+### try model with/without high leverage points
+
+#fit model without leverage >0.0005
+
+```{r}
+md3.rm.leverage<-lm(int_rate^0.6~.-tr_delinq_2yrs,data = loandata.tr,subset = (md3inf$hat<0.0007))
+summary(md3.rm.leverage)
+
+```
+Compare to md3 (fit whole data), not much difference in result. 
+
+## Model Validatoin
+
+```{r}
+set.seed(1)
+loandata_cv = loandata.tr
+loandata_cv = loandata_cv[sample(42307),]
+int_rate_tran = loandata_cv[,1]^0.6
+
+# full model(model0) rmse (9 variables)
+
+rmse_n_0 = numeric(10)
+rmse0 = function(x,y) sqrt (mean((x-y)^2))
+for(i in 1:10){
+  model0 = lm (int_rate^0.6~.,data = loandata_cv[-((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  prediction_0 = predict(model0,loandata_cv[((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  rmse_n_0[i] = rmse0(int_rate_tran[((4230*(i-1)+1):(4229+4230*(i-1)+1))],prediction_0)
+}
+sqrt(sum(rmse_n_0^2)*4230/42300) #0.4011387
+m0_rmse<-c(9,0.4011387)
+
+# model 1 with 8 variables
+rmse_n_1 = numeric(10)
+rmse1 = function(x,y) sqrt (mean((x-y)^2))
+for(i in 1:10){
+  model1 = lm (int_rate^0.6~.-tr_delinq_2yrs,data = loandata_cv[-((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  prediction1 = predict(model1,loandata_cv[((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  rmse_n_1[i] = rmse1(int_rate_tran[((4230*(i-1)+1):(4229+4230*(i-1)+1))],prediction1)
+}
+sqrt(sum(rmse_n_1^2)*4230/42300)#0.4011518
+m1_rmse<-c(8,0.4011518)
+
+# model 2 with 7 variables
+rmse_n_2= numeric(10)
+rmse2 =function(x,y) sqrt (mean((x-y)^2))
+for(i in 1:10){
+  model2 = lm (int_rate^0.6~.-home_ownership - tr_delinq_2yrs ,data = loandata_cv[-((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  prediction2 = predict(model2,loandata_cv[((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  rmse_n_2[i] = rmse2(int_rate_tran[((4230*(i-1)+1):(4229+4230*(i-1)+1))],prediction2)
+}
+sqrt(sum(rmse_n_2^2)*4230/42300)#0.4013128 larger than the model with 8 covariates(including home_ownership)
+m2_rmse<-c(7,0.4013128)
+
+# combine the pairs and plot rmse vs. number of variables
+
+rmse_plot<-rbind(m0_rmse,m1_rmse,m2_rmse)
+plot(x=rmse_plot[,1],y=rmse_plot[,2],xlab = "number of covariates",ylab="RMSE",type = "b")
+
+```
+
+
+```{r,results='hide',echo=FALSE}
+
+# Also test the model (model 3) without Multi-covariate transformation (only transform response)
+# model 3 with 9 variables
+
+loandata_cv_10 = loandata
+loandata_cv_10 = loandata_cv_10[sample(42307),]
+rmse_n_3= numeric(10)
+rmse3 =function(x,y) sqrt (mean((x-y)^2))
+for(i in 1:10){
+  model3 = lm (int_rate^0.6~. -annual_inc,data = loandata_cv_10[-((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  prediction3 = predict(model3,loandata_cv_10[((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  rmse_n_3[i] = rmse3(loandata_cv_10$int_rate[((4230*(i-1)+1):(4229+4230*(i-1)+1))]^0.6,prediction3)
+}
+sqrt(sum(rmse_n_3^2)*4230/42300) #
+
+```
+
+```{r}
+# Also test the model (model 4) without any transformation
+# model 4 with 9 variables
+loandata_cv_9 = loandata
+loandata_cv_9 = loandata_cv_9[sample(42307),]
+rmse_n_4= numeric(10)
+rmse4 =function(x,y) sqrt (mean((x-y)^2))
+for(i in 1:10){
+  model4 = lm (int_rate~.-annual_inc ,data = loandata_cv_9[-((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  prediction4 = predict(model4,loandata_cv_9[((4230*(i-1)+1):(4229+4230*(i-1)+1)),])
+  rmse_n_4[i] = rmse3(loandata$int_rate[((4230*(i-1)+1):(4229+4230*(i-1)+1))],prediction4)
+}
+
+sqrt(sum(rmse_n_4^2)*4230/42300) #4.927791
+
+```
+
+
+We compare RMSE for different models
+Without transformation (mod 3&4), the RMSE is much larger; 
+After transformation, with delinquency does not lower the RMSE significantly (compare mod 0 vs. 1); 
+However, deleting home_ownership (with largest p-value) causes the RMSE to increase, lower the accuracy.
+Thus our chosen model performs the best prediction in practice.
+
+
+
